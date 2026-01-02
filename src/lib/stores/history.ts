@@ -1,5 +1,16 @@
 import { writable, derived, get } from 'svelte/store';
-import { layerPixelBuffers, isDirty } from './document';
+import { layerPixelBuffers, markLayerDirty, openDocuments, activeDocumentId } from './documents';
+import { updateSelectionState } from './selection';
+
+// Selection snapshot for history
+export interface SelectionSnapshot {
+	bounds: { x: number; y: number; width: number; height: number } | undefined;
+	vectorPath?: {
+		type: 'rect' | 'ellipse' | 'polygon';
+		points: { x: number; y: number }[];
+		closed: boolean;
+	};
+}
 
 // A history entry stores the pixels that were changed
 export interface HistoryEntry {
@@ -18,6 +29,12 @@ export interface HistoryEntry {
 	beforePixels: Uint8ClampedArray;
 	// The pixels AFTER the change (for redo)
 	afterPixels: Uint8ClampedArray;
+	// Optional selection state (for move operations)
+	selectionBefore?: SelectionSnapshot;
+	selectionAfter?: SelectionSnapshot;
+	// Optional layer position (for layer move operations without selection)
+	layerPositionBefore?: { x: number; y: number };
+	layerPositionAfter?: { x: number; y: number };
 }
 
 interface HistoryState {
@@ -76,15 +93,26 @@ function createHistoryStore() {
 		},
 
 		// Undo the last action
-		undo(): boolean {
+		// Returns object with success and restored selection bounds (for syncing floating selection)
+		undo(): { success: boolean; restoredSelectionBounds?: { x: number; y: number; width: number; height: number } } {
 			const state = get({ subscribe });
-			if (state.undoStack.length === 0) return false;
+			if (state.undoStack.length === 0) return { success: false };
 
 			const entry = state.undoStack[state.undoStack.length - 1];
 
 			// Restore the "before" pixels
 			const restored = restorePixels(entry.layerId, entry.bounds, entry.beforePixels);
-			if (!restored) return false;
+			if (!restored) return { success: false };
+
+			// Restore selection state if present
+			if (entry.selectionBefore) {
+				restoreSelectionState(entry.selectionBefore);
+			}
+
+			// Restore layer position if present
+			if (entry.layerPositionBefore) {
+				restoreLayerPosition(entry.layerId, entry.layerPositionBefore);
+			}
 
 			update((s) => ({
 				...s,
@@ -92,20 +120,30 @@ function createHistoryStore() {
 				redoStack: [...s.redoStack, entry]
 			}));
 
-			isDirty.set(true);
-			return true;
+			return { success: true, restoredSelectionBounds: entry.selectionBefore?.bounds };
 		},
 
 		// Redo the last undone action
-		redo(): boolean {
+		// Returns object with success and restored selection bounds (for syncing floating selection)
+		redo(): { success: boolean; restoredSelectionBounds?: { x: number; y: number; width: number; height: number } } {
 			const state = get({ subscribe });
-			if (state.redoStack.length === 0) return false;
+			if (state.redoStack.length === 0) return { success: false };
 
 			const entry = state.redoStack[state.redoStack.length - 1];
 
 			// Restore the "after" pixels
 			const restored = restorePixels(entry.layerId, entry.bounds, entry.afterPixels);
-			if (!restored) return false;
+			if (!restored) return { success: false };
+
+			// Restore selection state if present
+			if (entry.selectionAfter) {
+				restoreSelectionState(entry.selectionAfter);
+			}
+
+			// Restore layer position if present
+			if (entry.layerPositionAfter) {
+				restoreLayerPosition(entry.layerId, entry.layerPositionAfter);
+			}
 
 			update((s) => ({
 				...s,
@@ -113,8 +151,7 @@ function createHistoryStore() {
 				undoStack: [...s.undoStack, entry]
 			}));
 
-			isDirty.set(true);
-			return true;
+			return { success: true, restoredSelectionBounds: entry.selectionAfter?.bounds };
 		},
 
 		// Clear all history
@@ -131,25 +168,30 @@ function createHistoryStore() {
 		// Jump to a specific state by index
 		// Index 0 = original state (before any actions)
 		// Index 1 = after first action, etc.
-		jumpTo(targetIndex: number): void {
+		// Returns the restored selection bounds from the final undo/redo
+		jumpTo(targetIndex: number): { restoredSelectionBounds?: { x: number; y: number; width: number; height: number } } {
 			const state = get({ subscribe });
 			const currentIndex = state.undoStack.length;
 
-			if (targetIndex === currentIndex) return;
+			if (targetIndex === currentIndex) return {};
+
+			let lastResult: { success: boolean; restoredSelectionBounds?: { x: number; y: number; width: number; height: number } } = { success: false };
 
 			if (targetIndex < currentIndex) {
 				// Need to undo
 				const undoCount = currentIndex - targetIndex;
 				for (let i = 0; i < undoCount; i++) {
-					this.undo();
+					lastResult = this.undo();
 				}
 			} else {
 				// Need to redo
 				const redoCount = targetIndex - currentIndex;
 				for (let i = 0; i < redoCount; i++) {
-					this.redo();
+					lastResult = this.redo();
 				}
 			}
+
+			return { restoredSelectionBounds: lastResult.restoredSelectionBounds };
 		}
 	};
 }
@@ -160,13 +202,14 @@ function restorePixels(
 	bounds: { x: number; y: number; width: number; height: number },
 	pixels: Uint8ClampedArray
 ): boolean {
+	// layerPixelBuffers is a derived store, so we get() to read the current value
 	const buffers = get(layerPixelBuffers);
 	const buffer = buffers.get(layerId);
 	if (!buffer) return false;
 
 	const { x, y, width, height } = bounds;
 
-	// Copy pixels back to the buffer
+	// Copy pixels back to the buffer (direct mutation of the underlying data)
 	for (let row = 0; row < height; row++) {
 		for (let col = 0; col < width; col++) {
 			const srcIdx = (row * width + col) * 4;
@@ -179,10 +222,69 @@ function restorePixels(
 		}
 	}
 
-	// Trigger reactivity
-	layerPixelBuffers.update((b) => new Map(b));
+	// Trigger reactivity by marking the layer dirty (this updates the underlying store)
+	markLayerDirty(layerId);
 
 	return true;
+}
+
+// Helper to restore selection state
+function restoreSelectionState(snapshot: SelectionSnapshot): void {
+	updateSelectionState((state) => {
+		// Determine selection type from vectorPath or bounds
+		let selectionType: 'none' | 'rect' | 'ellipse' | 'path' | 'bitmap' = 'none';
+		if (snapshot.vectorPath) {
+			if (snapshot.vectorPath.type === 'polygon') {
+				selectionType = 'path';
+			} else {
+				selectionType = snapshot.vectorPath.type;
+			}
+		} else if (snapshot.bounds) {
+			selectionType = 'rect'; // Default to rect if we have bounds but no vectorPath
+		}
+
+		return {
+			...state,
+			selection: {
+				...state.selection,
+				type: selectionType,
+				bounds: snapshot.bounds
+			},
+			vectorPath: snapshot.vectorPath
+		};
+	});
+}
+
+// Helper to restore layer position
+function restoreLayerPosition(layerId: string, position: { x: number; y: number }): void {
+	const docId = get(activeDocumentId);
+	if (!docId) return;
+
+	openDocuments.update((docs) => {
+		const state = docs.get(docId);
+		if (!state) return docs;
+
+		const layerIndex = state.document.layers.findIndex((l) => l.id === layerId);
+		if (layerIndex === -1) return docs;
+
+		const updatedLayers = [...state.document.layers];
+		updatedLayers[layerIndex] = {
+			...updatedLayers[layerIndex],
+			x: position.x,
+			y: position.y
+		};
+
+		docs.set(docId, {
+			...state,
+			isDirty: true,
+			document: {
+				...state.document,
+				layers: updatedLayers
+			}
+		});
+
+		return new Map(docs);
+	});
 }
 
 export const history = createHistoryStore();

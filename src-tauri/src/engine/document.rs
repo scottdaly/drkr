@@ -1,5 +1,6 @@
 use super::history::HistoryManager;
 use super::layer::Layer;
+use crate::commands::crop::CropResult;
 use crate::error::{AppError, AppResult};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -223,7 +224,16 @@ impl DocumentManager {
         Ok(())
     }
 
+    /// Rename a document
+    pub fn rename_document(&mut self, doc_id: &str, name: &str) -> AppResult<()> {
+        let doc = self.documents.get_mut(doc_id)
+            .ok_or_else(|| AppError::DocumentNotFound(doc_id.to_string()))?;
+        doc.name = name.to_string();
+        Ok(())
+    }
+
     /// List all open document IDs
+    #[allow(dead_code)]
     pub fn list_documents(&self) -> Vec<String> {
         self.documents.keys().cloned().collect()
     }
@@ -231,6 +241,131 @@ impl DocumentManager {
     /// Get all open documents
     pub fn get_all_documents(&self) -> Vec<&Document> {
         self.documents.values().collect()
+    }
+
+    /// Crop the document to the specified region.
+    ///
+    /// This modifies the document dimensions and crops/expands all layer pixel buffers.
+    /// Negative x/y values extend the canvas, positive values crop into existing content.
+    ///
+    /// # Arguments
+    /// * `doc_id` - The document ID
+    /// * `crop_x` - X coordinate of crop region origin (in original document space)
+    /// * `crop_y` - Y coordinate of crop region origin
+    /// * `new_width` - Width of the cropped document
+    /// * `new_height` - Height of the cropped document
+    pub fn crop_document(
+        &mut self,
+        doc_id: &str,
+        crop_x: i32,
+        crop_y: i32,
+        new_width: u32,
+        new_height: u32,
+    ) -> AppResult<CropResult> {
+        let doc = self
+            .documents
+            .get_mut(doc_id)
+            .ok_or_else(|| AppError::DocumentNotFound(doc_id.to_string()))?;
+
+        let mut layers_affected: Vec<String> = Vec::new();
+
+        // Process each layer
+        for layer in &mut doc.layers {
+            // Get current pixel data for this layer
+            let old_pixels = self
+                .pixel_data
+                .get(&layer.id)
+                .cloned()
+                .unwrap_or_else(|| vec![0u8; (layer.width * layer.height * 4) as usize]);
+
+            // Calculate new layer pixels
+            let new_pixels = Self::crop_layer_pixels(
+                &old_pixels,
+                layer.width,
+                layer.height,
+                layer.x,
+                layer.y,
+                crop_x,
+                crop_y,
+                new_width,
+                new_height,
+            );
+
+            // Update layer dimensions and position
+            // After crop, layer position is adjusted relative to new document origin
+            layer.x -= crop_x;
+            layer.y -= crop_y;
+            layer.width = new_width;
+            layer.height = new_height;
+
+            // Store new pixel data
+            self.pixel_data.insert(layer.id.clone(), new_pixels);
+            layers_affected.push(layer.id.clone());
+        }
+
+        // Update document dimensions
+        doc.width = new_width;
+        doc.height = new_height;
+        doc.mark_modified();
+
+        Ok(CropResult {
+            doc_id: doc_id.to_string(),
+            new_width,
+            new_height,
+            layers_affected,
+        })
+    }
+
+    /// Crop/expand layer pixels to fit a new region.
+    ///
+    /// This handles both cropping (removing pixels outside the region)
+    /// and expansion (adding transparent pixels for new areas).
+    fn crop_layer_pixels(
+        old_pixels: &[u8],
+        old_width: u32,
+        old_height: u32,
+        layer_x: i32,
+        layer_y: i32,
+        crop_x: i32,
+        crop_y: i32,
+        new_width: u32,
+        new_height: u32,
+    ) -> Vec<u8> {
+        let mut new_pixels = vec![0u8; (new_width * new_height * 4) as usize];
+
+        // For each pixel in the new buffer, determine if it should come from old buffer
+        for new_y in 0..new_height as i32 {
+            for new_x in 0..new_width as i32 {
+                // Calculate position in original document space
+                let doc_x = crop_x + new_x;
+                let doc_y = crop_y + new_y;
+
+                // Calculate position in old layer space
+                let old_layer_x = doc_x - layer_x;
+                let old_layer_y = doc_y - layer_y;
+
+                // Check if this position was within the old layer bounds
+                if old_layer_x >= 0
+                    && old_layer_x < old_width as i32
+                    && old_layer_y >= 0
+                    && old_layer_y < old_height as i32
+                {
+                    // Copy pixel from old buffer
+                    let old_idx = ((old_layer_y as u32 * old_width + old_layer_x as u32) * 4) as usize;
+                    let new_idx = ((new_y as u32 * new_width + new_x as u32) * 4) as usize;
+
+                    if old_idx + 3 < old_pixels.len() && new_idx + 3 < new_pixels.len() {
+                        new_pixels[new_idx] = old_pixels[old_idx];
+                        new_pixels[new_idx + 1] = old_pixels[old_idx + 1];
+                        new_pixels[new_idx + 2] = old_pixels[old_idx + 2];
+                        new_pixels[new_idx + 3] = old_pixels[old_idx + 3];
+                    }
+                }
+                // Else: pixel stays transparent (already initialized to 0)
+            }
+        }
+
+        new_pixels
     }
 }
 

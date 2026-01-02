@@ -1,5 +1,4 @@
 use super::types::*;
-use crate::engine::layer::Layer;
 use crate::engine::Document;
 use crate::error::{AppError, AppResult};
 use image::io::Reader as ImageReader;
@@ -100,6 +99,7 @@ impl<R: Read + std::io::Seek> DrkrReader<R> {
     }
 
     /// Read the thumbnail
+    #[allow(dead_code)]
     pub fn read_thumbnail(&mut self) -> AppResult<Vec<u8>> {
         let webp_data = self.read_file_as_bytes("preview/thumbnail.webp")?;
         decode_webp_to_rgba(&webp_data)

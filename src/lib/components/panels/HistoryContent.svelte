@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { history, historyList, canUndo, canRedo } from '$lib/stores/history';
 	import { document } from '$lib/stores/documents';
+	import { moveEngine } from '$lib/engine/moveEngine';
 	import { Brush, Eraser, Trash2, Image } from 'lucide-svelte';
 
 	function getActionIcon(name: string) {
@@ -10,12 +11,14 @@
 	}
 
 	function handleJumpTo(index: number) {
-		history.jumpTo(index);
+		const result = history.jumpTo(index);
+		moveEngine.syncFloatingSelectionAfterUndo(result.restoredSelectionBounds);
 	}
 
 	function handleClearHistory() {
 		if (confirm('Clear all history? This cannot be undone.')) {
 			history.clear();
+			moveEngine.clearFloatingSelection();
 		}
 	}
 

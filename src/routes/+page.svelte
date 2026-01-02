@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
 	import { get } from 'svelte/store';
 	import MenuBar from '$lib/components/MenuBar.svelte';
 	import DocumentTabBar from '$lib/components/DocumentTabBar.svelte';
@@ -19,22 +20,53 @@
 		closeDocument,
 		fitToScreen,
 		setZoom,
-		viewport
+		viewport,
+		document as documentStore,
+		isDirty,
+		getDocumentDisplayName
 	} from '$lib/stores/documents';
 	import { history } from '$lib/stores/history';
 	import { setTool, brushSettings, swapColors, resetColors } from '$lib/stores/tools';
+	import { moveEngine } from '$lib/engine/moveEngine';
+	import { loadRecentFiles } from '$lib/stores/recentFiles';
 	import type { ToolType } from '$lib/types/tools';
+
+	// Load recent files on mount
+	onMount(() => {
+		loadRecentFiles();
+	});
+
+	// Reactive window title
+	$: {
+		if ($documentStore) {
+			const docName = getDocumentDisplayName($documentStore);
+			const dirty = $isDirty ? ' *' : '';
+			if (typeof document !== 'undefined') {
+				document.title = `${docName}${dirty} - Darker`;
+			}
+		} else {
+			if (typeof document !== 'undefined') {
+				document.title = 'Darker';
+			}
+		}
+	}
 
 	let showNewDocumentDialog = false;
 
 	async function handleCreateDocument(
-		event: CustomEvent<{ name: string; width: number; height: number; resolution: number }>
+		event: CustomEvent<{
+			name: string;
+			width: number;
+			height: number;
+			resolution: number;
+			background: { type: 'white' | 'black' | 'transparent' | 'custom'; color: string };
+		}>
 	) {
 		showNewDocumentDialog = false;
-		const { name, width, height, resolution } = event.detail;
+		const { name, width, height, resolution, background } = event.detail;
 
 		try {
-			await createNewDocument(name, width, height, resolution);
+			await createNewDocument(name, width, height, resolution, background);
 		} catch (e) {
 			console.error('Failed to create document:', e);
 		}
@@ -113,19 +145,28 @@
 		// Undo (Ctrl/Cmd+Z)
 		if (isMod && !event.shiftKey && key === 'z') {
 			event.preventDefault();
-			history.undo();
+			const result = history.undo();
+			if (result.success) {
+				moveEngine.syncFloatingSelectionAfterUndo(result.restoredSelectionBounds);
+			}
 			return;
 		}
 
 		// Redo (Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y)
 		if (isMod && event.shiftKey && key === 'z') {
 			event.preventDefault();
-			history.redo();
+			const result = history.redo();
+			if (result.success) {
+				moveEngine.syncFloatingSelectionAfterUndo(result.restoredSelectionBounds);
+			}
 			return;
 		}
 		if (isMod && key === 'y') {
 			event.preventDefault();
-			history.redo();
+			const result = history.redo();
+			if (result.success) {
+				moveEngine.syncFloatingSelectionAfterUndo(result.restoredSelectionBounds);
+			}
 			return;
 		}
 
@@ -227,7 +268,7 @@
 
 <div class="app-container">
 	<MenuBar on:newDocument={() => (showNewDocumentDialog = true)} />
-	<DocumentTabBar />
+	<DocumentTabBar on:newDocument={() => (showNewDocumentDialog = true)} />
 	<Toolbar />
 
 	<div class="main-content">
@@ -236,7 +277,7 @@
 		</aside>
 
 		<main class="canvas-area">
-			<Canvas />
+			<Canvas on:newDocument={() => (showNewDocumentDialog = true)} />
 		</main>
 
 		<aside class="right-panels">

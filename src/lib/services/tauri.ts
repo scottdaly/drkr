@@ -59,6 +59,10 @@ export async function setDocumentPath(docId: string, path: string): Promise<Docu
 	return invoke<Document>('set_document_path', { docId, path });
 }
 
+export async function renameDocument(docId: string, name: string): Promise<Document> {
+	return invoke<Document>('rename_document', { docId, name });
+}
+
 // Layer Commands
 
 export async function addLayer(docId: string, name: string): Promise<Layer> {
@@ -98,6 +102,47 @@ export async function reorderLayers(
 export async function getLayerPixels(layerId: string): Promise<Uint8Array> {
 	const pixels = await invoke<number[]>('get_layer_pixels', { layerId });
 	return new Uint8Array(pixels);
+}
+
+/**
+ * Get layer pixels as base64 encoded string (more efficient for large transfers)
+ * Uses ~33% overhead instead of ~500% for JSON array serialization
+ */
+export async function getLayerPixelsBase64(layerId: string): Promise<Uint8Array> {
+	const base64 = await invoke<string>('get_layer_pixels_base64', { layerId });
+	return base64ToUint8Array(base64);
+}
+
+/**
+ * Set layer pixels from frontend to backend using base64 encoding
+ * Used to sync frontend pixels to backend before saving
+ */
+export async function setLayerPixelsBase64(
+	layerId: string,
+	pixels: Uint8ClampedArray | Uint8Array
+): Promise<void> {
+	const base64 = uint8ArrayToBase64(pixels);
+	return invoke('set_layer_pixels_base64', { layerId, pixelsBase64: base64 });
+}
+
+// Base64 encoding/decoding helpers
+function uint8ArrayToBase64(bytes: Uint8ClampedArray | Uint8Array): string {
+	let binary = '';
+	const len = bytes.byteLength;
+	for (let i = 0; i < len; i++) {
+		binary += String.fromCharCode(bytes[i]);
+	}
+	return btoa(binary);
+}
+
+function base64ToUint8Array(base64: string): Uint8Array {
+	const binary = atob(base64);
+	const len = binary.length;
+	const bytes = new Uint8Array(len);
+	for (let i = 0; i < len; i++) {
+		bytes[i] = binary.charCodeAt(i);
+	}
+	return bytes;
 }
 
 // Filter Commands
@@ -209,6 +254,25 @@ export async function applyBrushStroke(
 		color,
 		isEraser
 	});
+}
+
+// Crop Commands
+
+export interface CropResult {
+	docId: string;
+	newWidth: number;
+	newHeight: number;
+	layersAffected: string[];
+}
+
+export async function cropDocument(
+	docId: string,
+	x: number,
+	y: number,
+	width: number,
+	height: number
+): Promise<CropResult> {
+	return invoke<CropResult>('crop_document', { docId, x, y, width, height });
 }
 
 // Dialog Helpers

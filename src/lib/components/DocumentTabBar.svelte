@@ -1,24 +1,73 @@
 <script lang="ts">
-	import { X } from 'lucide-svelte';
+	import { createEventDispatcher, tick } from 'svelte';
+	import { X, Plus } from 'lucide-svelte';
 	import {
 		openDocuments,
 		activeDocumentId,
 		documentOrder,
 		switchToDocument,
 		closeDocument,
-		reorderTabs
+		reorderTabs,
+		renameDocument
 	} from '$lib/stores/documents';
+
+	const dispatch = createEventDispatcher<{ newDocument: void }>();
 
 	let draggedTabId: string | null = null;
 	let dragOverTabId: string | null = null;
 
+	// Rename state
+	let editingTabId: string | null = null;
+	let editingName = '';
+	let renameInput: HTMLInputElement;
+
 	function handleTabClick(docId: string) {
-		switchToDocument(docId);
+		if (editingTabId !== docId) {
+			switchToDocument(docId);
+		}
 	}
 
 	async function handleCloseTab(event: MouseEvent, docId: string) {
 		event.stopPropagation();
 		await closeDocument(docId);
+	}
+
+	async function startRename(docId: string) {
+		const state = $openDocuments.get(docId);
+		if (!state) return;
+
+		// Use document name (not filename from path) for editing
+		editingName = state.document.name;
+		editingTabId = docId;
+
+		await tick();
+		if (renameInput) {
+			renameInput.focus();
+			renameInput.select();
+		}
+	}
+
+	async function finishRename() {
+		if (editingTabId && editingName.trim()) {
+			await renameDocument(editingTabId, editingName.trim());
+		}
+		editingTabId = null;
+		editingName = '';
+	}
+
+	function cancelRename() {
+		editingTabId = null;
+		editingName = '';
+	}
+
+	function handleRenameKeydown(event: KeyboardEvent) {
+		if (event.key === 'Enter') {
+			event.preventDefault();
+			finishRename();
+		} else if (event.key === 'Escape') {
+			event.preventDefault();
+			cancelRename();
+		}
 	}
 
 	function handleDragStart(event: DragEvent, docId: string) {
@@ -73,10 +122,6 @@
 		}
 		return doc.name;
 	}
-
-	function isDocumentDirty(docId: string): boolean {
-		return $openDocuments.get(docId)?.isDirty ?? false;
-	}
 </script>
 
 {#if $documentOrder.length > 0}
@@ -88,19 +133,30 @@
 					class:active={docId === $activeDocumentId}
 					class:dragging={docId === draggedTabId}
 					class:drag-over={docId === dragOverTabId}
-					draggable="true"
+					class:editing={docId === editingTabId}
+					draggable={editingTabId !== docId}
 					on:click={() => handleTabClick(docId)}
+					on:dblclick={() => startRename(docId)}
 					on:dragstart={(e) => handleDragStart(e, docId)}
 					on:dragover={(e) => handleDragOver(e, docId)}
 					on:dragleave={handleDragLeave}
 					on:drop={(e) => handleDrop(e, docId)}
 					on:dragend={handleDragEnd}
 				>
-					<span class="tab-name">
-						{getDocumentDisplayName(docId)}
-					</span>
-					{#if isDocumentDirty(docId)}
-						<span class="dirty-indicator" title="Unsaved changes"></span>
+					{#if editingTabId === docId}
+						<input
+							type="text"
+							class="rename-input"
+							bind:this={renameInput}
+							bind:value={editingName}
+							on:blur={finishRename}
+							on:keydown={handleRenameKeydown}
+							on:click|stopPropagation
+						/>
+					{:else}
+						<span class="tab-name">
+							{getDocumentDisplayName(docId)}{#if $openDocuments.get(docId)?.isDirty} *{/if}
+						</span>
 					{/if}
 					<button
 						class="close-btn"
@@ -111,6 +167,13 @@
 					</button>
 				</button>
 			{/each}
+			<button
+				class="new-tab-btn"
+				title="New Document"
+				on:click={() => dispatch('newDocument')}
+			>
+				<Plus size={16} />
+			</button>
 		</div>
 	</div>
 {/if}
@@ -161,8 +224,13 @@
 		@apply truncate flex-1;
 	}
 
-	.dirty-indicator {
-		@apply w-2 h-2 rounded-full bg-editor-accent shrink-0;
+	.tab.editing {
+		@apply cursor-text;
+	}
+
+	.rename-input {
+		@apply flex-1 min-w-0 px-1 py-0.5 bg-editor-bg border border-editor-accent rounded
+			   text-sm text-editor-text outline-none;
 	}
 
 	.close-btn {
@@ -177,5 +245,11 @@
 
 	.close-btn:hover {
 		@apply text-editor-text;
+	}
+
+	.new-tab-btn {
+		@apply flex items-center justify-center w-8 h-full
+			   text-editor-text-muted hover:text-editor-text hover:bg-editor-panel
+			   transition-colors shrink-0;
 	}
 </style>

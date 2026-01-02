@@ -208,3 +208,19 @@ pub fn set_document_path(
     manager.get(&doc_id).cloned()
         .ok_or_else(|| AppError::DocumentNotFound(doc_id))
 }
+
+/// Rename a document
+#[tauri::command]
+pub fn rename_document(
+    manager: State<'_, Mutex<DocumentManager>>,
+    doc_id: String,
+    name: String,
+) -> AppResult<Document> {
+    let mut manager = manager.lock().map_err(|_| {
+        AppError::InvalidOperation("Failed to acquire document manager lock".into())
+    })?;
+
+    manager.rename_document(&doc_id, &name)?;
+    manager.get(&doc_id).cloned()
+        .ok_or_else(|| AppError::DocumentNotFound(doc_id))
+}

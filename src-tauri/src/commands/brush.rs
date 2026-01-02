@@ -10,6 +10,7 @@ pub struct BrushStrokePoint {
     pub x: f64,
     pub y: f64,
     pub pressure: Option<f64>,
+    #[allow(dead_code)]
     pub timestamp: u64,
 }
 
@@ -20,6 +21,7 @@ pub struct BrushStrokeSettings {
     pub hardness: f64,    // 0-100
     pub opacity: f64,     // 0-100
     pub flow: f64,        // 0-100
+    #[allow(dead_code)]
     pub spacing: f64,     // percentage
 }
 

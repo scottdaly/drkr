@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct HistoryEntry {
     pub id: String,
@@ -8,12 +9,14 @@ pub struct HistoryEntry {
     // In a real implementation, this would store document snapshots or deltas
 }
 
+#[allow(dead_code)]
 pub struct HistoryManager {
     undo_stack: VecDeque<HistoryEntry>,
     redo_stack: Vec<HistoryEntry>,
     max_entries: usize,
 }
 
+#[allow(dead_code)]
 impl HistoryManager {
     pub fn new(max_entries: usize) -> Self {
         Self {

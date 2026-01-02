@@ -10,9 +10,11 @@
 		closeDocument,
 		fitToScreen,
 		setZoom,
-		viewport
+		viewport,
+		getDocumentDisplayName
 	} from '$lib/stores/documents';
 	import { history, canUndo, canRedo, undoName, redoName } from '$lib/stores/history';
+	import { moveEngine } from '$lib/engine/moveEngine';
 	import { FilePlus, FolderOpen, Save, Download, X, Undo2, Redo2, ZoomIn, ZoomOut, Maximize } from 'lucide-svelte';
 
 	const dispatch = createEventDispatcher<{
@@ -68,12 +70,18 @@
 
 	function handleUndo() {
 		closeMenu();
-		history.undo();
+		const result = history.undo();
+		if (result.success) {
+			moveEngine.syncFloatingSelectionAfterUndo(result.restoredSelectionBounds);
+		}
 	}
 
 	function handleRedo() {
 		closeMenu();
-		history.redo();
+		const result = history.redo();
+		if (result.success) {
+			moveEngine.syncFloatingSelectionAfterUndo(result.restoredSelectionBounds);
+		}
 	}
 
 	function handleZoomIn() {
@@ -213,7 +221,7 @@
 	{#if $document}
 		<div class="document-info">
 			<span class="document-name">
-				{$document.name}{$isDirty ? ' *' : ''}
+				{getDocumentDisplayName($document)}{$isDirty ? ' *' : ''}
 			</span>
 			<span class="document-size">
 				{$document.width} x {$document.height}

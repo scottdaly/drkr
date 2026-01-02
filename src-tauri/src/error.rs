@@ -12,12 +12,14 @@ pub enum AppError {
     #[error("Invalid operation: {0}")]
     InvalidOperation(String),
 
+    #[allow(dead_code)]
     #[error("File error: {0}")]
     FileError(String),
 
     #[error("Image processing error: {0}")]
     ImageError(String),
 
+    #[allow(dead_code)]
     #[error("AI service error: {0}")]
     AIError(String),
 

@@ -71,6 +71,7 @@ impl Layer {
         }
     }
 
+    #[allow(dead_code)]
     pub fn bounds(&self) -> (i32, i32, u32, u32) {
         (self.x, self.y, self.width, self.height)
     }

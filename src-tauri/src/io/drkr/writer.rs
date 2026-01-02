@@ -27,6 +27,7 @@ impl DrkrWriter<BufWriter<File>> {
 
 impl<W: Write + std::io::Seek> DrkrWriter<W> {
     /// Create a new DRKR writer from a writer
+    #[allow(dead_code)]
     pub fn new(writer: W) -> Self {
         Self {
             zip: ZipWriter::new(writer),
@@ -83,7 +84,7 @@ impl<W: Write + std::io::Seek> DrkrWriter<W> {
         Ok(())
     }
 
-    fn write_manifest(&mut self, doc: &Document) -> AppResult<()> {
+    fn write_manifest(&mut self, _doc: &Document) -> AppResult<()> {
         let now = chrono::Utc::now().to_rfc3339();
         let manifest = DrkrManifest {
             drkr_version: DRKR_VERSION.to_string(),

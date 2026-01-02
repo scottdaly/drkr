@@ -98,3 +98,43 @@ pub fn get_layer_pixels(
         .cloned()
         .ok_or_else(|| AppError::LayerNotFound(layer_id))
 }
+
+/// Get layer pixels as base64 encoded string (more efficient for IPC)
+#[tauri::command]
+pub fn get_layer_pixels_base64(
+    manager: State<'_, Mutex<DocumentManager>>,
+    layer_id: String,
+) -> AppResult<String> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+
+    let manager = manager.lock().map_err(|_| {
+        AppError::InvalidOperation("Failed to acquire document manager lock".into())
+    })?;
+
+    let pixels = manager
+        .get_layer_pixels(&layer_id)
+        .ok_or_else(|| AppError::LayerNotFound(layer_id))?;
+
+    Ok(STANDARD.encode(pixels))
+}
+
+/// Set layer pixels from base64 encoded string (for syncing frontend to backend)
+#[tauri::command]
+pub fn set_layer_pixels_base64(
+    manager: State<'_, Mutex<DocumentManager>>,
+    layer_id: String,
+    pixels_base64: String,
+) -> AppResult<()> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+
+    let pixels = STANDARD.decode(&pixels_base64).map_err(|e| {
+        AppError::InvalidOperation(format!("Invalid base64 data: {}", e))
+    })?;
+
+    let mut manager = manager.lock().map_err(|_| {
+        AppError::InvalidOperation("Failed to acquire document manager lock".into())
+    })?;
+
+    manager.set_layer_pixels(&layer_id, pixels);
+    Ok(())
+}

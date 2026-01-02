@@ -1,6 +1,10 @@
 import { writable, derived, get } from 'svelte/store';
 import type { Document, Layer, Selection, Viewport } from '$lib/types/document';
 import * as tauri from '$lib/services/tauri';
+import { addRecentFile, getFilenameFromPath } from './recentFiles';
+import { isPointInSelectionBounds } from '$lib/utils/selectionUtils';
+import { colors } from './tools';
+// Note: history is imported dynamically in cropDocumentToRegion to avoid circular dependency
 
 // ============ Types ============
 
@@ -131,7 +135,8 @@ async function loadLayerPixelsForDocument(doc: Document): Promise<Map<string, La
 
 	for (const layer of doc.layers) {
 		try {
-			const pixels = await tauri.getLayerPixels(layer.id);
+			// Use base64 encoding for efficient pixel transfer (~33% overhead vs ~500% for JSON array)
+			const pixels = await tauri.getLayerPixelsBase64(layer.id);
 			const data = new Uint8ClampedArray(pixels);
 			buffers.set(layer.id, {
 				data,
@@ -147,13 +152,61 @@ async function loadLayerPixelsForDocument(doc: Document): Promise<Map<string, La
 	return buffers;
 }
 
+/**
+ * Sync all dirty layer pixels from frontend to backend.
+ * Called before saving to ensure backend has current pixel data.
+ */
+async function syncDirtyLayersToBackend(docId: string): Promise<void> {
+	const docs = get(openDocuments);
+	const state = docs.get(docId);
+	if (!state) return;
+
+	const syncPromises: Promise<void>[] = [];
+
+	for (const [layerId, buffer] of state.layerPixelBuffers) {
+		if (buffer.dirty) {
+			syncPromises.push(
+				tauri.setLayerPixelsBase64(layerId, buffer.data).then(() => {
+					// Mark as clean after successful sync
+					updateDocumentState(docId, (s) => {
+						const buf = s.layerPixelBuffers.get(layerId);
+						if (buf) buf.dirty = false;
+						return { ...s, layerPixelBuffers: new Map(s.layerPixelBuffers) };
+					});
+				})
+			);
+		}
+	}
+
+	await Promise.all(syncPromises);
+}
+
 // ============ Document Actions ============
+
+export interface BackgroundOption {
+	type: 'white' | 'black' | 'transparent' | 'custom';
+	color: string;
+}
+
+function hexToRgba(hex: string): { r: number; g: number; b: number; a: number } {
+	const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+	if (result) {
+		return {
+			r: parseInt(result[1], 16),
+			g: parseInt(result[2], 16),
+			b: parseInt(result[3], 16),
+			a: 255
+		};
+	}
+	return { r: 255, g: 255, b: 255, a: 255 };
+}
 
 export async function createNewDocument(
 	name: string,
 	width: number,
 	height: number,
-	resolution: number = 72
+	resolution: number = 72,
+	background: BackgroundOption = { type: 'white', color: '#ffffff' }
 ): Promise<void> {
 	isLoading.set(true);
 	error.set(null);
@@ -162,8 +215,45 @@ export async function createNewDocument(
 		const doc = await tauri.createDocument({ name, width, height, resolution });
 		const state = createDefaultDocumentState(doc);
 
-		// Load pixel data for the background layer
-		state.layerPixelBuffers = await loadLayerPixelsForDocument(doc);
+		// Create pixel buffers directly in frontend (no backend transfer needed)
+		for (const layer of doc.layers) {
+			const pixelCount = layer.width * layer.height * 4;
+			const data = new Uint8ClampedArray(pixelCount);
+
+			// Fill based on background type
+			if (background.type === 'transparent') {
+				// Leave as zeros (transparent)
+			} else if (background.type === 'black') {
+				// Fill with black (alpha = 255, RGB = 0)
+				for (let i = 0; i < pixelCount; i += 4) {
+					data[i] = 0;
+					data[i + 1] = 0;
+					data[i + 2] = 0;
+					data[i + 3] = 255;
+				}
+			} else if (background.type === 'custom') {
+				const rgba = hexToRgba(background.color);
+				for (let i = 0; i < pixelCount; i += 4) {
+					data[i] = rgba.r;
+					data[i + 1] = rgba.g;
+					data[i + 2] = rgba.b;
+					data[i + 3] = rgba.a;
+				}
+			} else {
+				// White (default)
+				data.fill(255);
+			}
+
+			state.layerPixelBuffers.set(layer.id, {
+				data,
+				width: layer.width,
+				height: layer.height,
+				dirty: false
+			});
+		}
+
+		// Mark as dirty since it's a new unsaved document
+		state.isDirty = true;
 
 		// Add to open documents
 		openDocuments.update((docs) => {
@@ -218,6 +308,11 @@ export async function openDocumentFromFile(): Promise<void> {
 		// Add to tab order and make active
 		documentOrder.update((order) => [...order, doc.id]);
 		activeDocumentId.set(doc.id);
+
+		// Add to recent files
+		if (path) {
+			addRecentFile(path, getFilenameFromPath(path));
+		}
 	} catch (e) {
 		error.set(e instanceof Error ? e.message : String(e));
 		throw e;
@@ -242,6 +337,9 @@ export async function saveDocument(docId?: string): Promise<boolean> {
 		error.set(null);
 
 		try {
+			// Sync dirty layer pixels to backend before saving
+			await syncDirtyLayersToBackend(targetId);
+
 			const updatedDoc = await tauri.saveDocumentDrkr(doc.id, doc.sourcePath);
 
 			// Update document state
@@ -281,6 +379,9 @@ export async function saveDocumentAs(docId?: string): Promise<boolean> {
 	error.set(null);
 
 	try {
+		// Sync dirty layer pixels to backend before saving
+		await syncDirtyLayersToBackend(targetId);
+
 		let updatedDoc: Document;
 
 		if (tauri.isDrkrFile(path)) {
@@ -552,6 +653,92 @@ export function clearSelection(): void {
 	}));
 }
 
+/**
+ * Delete (clear to transparent) the contents of the current selection
+ */
+export function deleteSelectionContents(
+	sel: Selection,
+	polygonPoints?: { x: number; y: number }[]
+): void {
+	const docId = get(activeDocumentId);
+	const layerId = get(activeLayerId);
+	if (!docId || !layerId) return;
+
+	const state = get(activeDocumentState);
+	if (!state) return;
+
+	const buffer = state.layerPixelBuffers.get(layerId);
+	if (!buffer) return;
+
+	if (sel.type === 'none' || !sel.bounds) return;
+
+	const { bounds } = sel;
+	const { data, width, height } = buffer;
+
+	// Iterate over selection bounds and clear pixels inside selection
+	const minY = Math.max(0, Math.floor(bounds.y));
+	const maxY = Math.min(height, Math.ceil(bounds.y + bounds.height));
+	const minX = Math.max(0, Math.floor(bounds.x));
+	const maxX = Math.min(width, Math.ceil(bounds.x + bounds.width));
+
+	for (let y = minY; y < maxY; y++) {
+		for (let x = minX; x < maxX; x++) {
+			if (isPointInSelectionBounds(x, y, sel, polygonPoints)) {
+				const idx = (y * width + x) * 4;
+				data[idx] = 0; // R
+				data[idx + 1] = 0; // G
+				data[idx + 2] = 0; // B
+				data[idx + 3] = 0; // A (transparent)
+			}
+		}
+	}
+
+	markLayerDirty(layerId);
+}
+
+/**
+ * Fill the current selection (or entire layer if no selection) with the foreground color
+ */
+export function fillSelectionWithColor(
+	sel: Selection,
+	polygonPoints?: { x: number; y: number }[]
+): void {
+	const docId = get(activeDocumentId);
+	const layerId = get(activeLayerId);
+	if (!docId || !layerId) return;
+
+	const state = get(activeDocumentState);
+	const colorState = get(colors);
+	if (!state) return;
+
+	const buffer = state.layerPixelBuffers.get(layerId);
+	if (!buffer) return;
+
+	const bounds = sel.bounds;
+	const { data, width, height } = buffer;
+	const fg = colorState.foreground;
+
+	// If no selection, fill entire layer; otherwise fill within bounds
+	const minX = bounds ? Math.max(0, Math.floor(bounds.x)) : 0;
+	const maxX = bounds ? Math.min(width, Math.ceil(bounds.x + bounds.width)) : width;
+	const minY = bounds ? Math.max(0, Math.floor(bounds.y)) : 0;
+	const maxY = bounds ? Math.min(height, Math.ceil(bounds.y + bounds.height)) : height;
+
+	for (let y = minY; y < maxY; y++) {
+		for (let x = minX; x < maxX; x++) {
+			if (isPointInSelectionBounds(x, y, sel, polygonPoints)) {
+				const idx = (y * width + x) * 4;
+				data[idx] = fg.r;
+				data[idx + 1] = fg.g;
+				data[idx + 2] = fg.b;
+				data[idx + 3] = Math.round(fg.a * 255);
+			}
+		}
+	}
+
+	markLayerDirty(layerId);
+}
+
 // ============ Viewport Actions ============
 
 export function setViewportSize(width: number, height: number): void {
@@ -571,10 +758,25 @@ export function updateViewport(
 	const docId = get(activeDocumentId);
 	if (!docId) return;
 
-	updateDocumentState(docId, (state) => ({
-		...state,
-		viewport: updater(state.viewport)
-	}));
+	updateDocumentState(docId, (state) => {
+		const newViewport = updater(state.viewport);
+
+		// Validate and clamp zoom to safe bounds
+		if (!isFinite(newViewport.zoom) || newViewport.zoom <= 0) {
+			newViewport.zoom = state.viewport.zoom;
+		} else {
+			newViewport.zoom = Math.max(0.1, Math.min(32, newViewport.zoom));
+		}
+
+		// Validate position values
+		if (!isFinite(newViewport.x)) newViewport.x = state.viewport.x;
+		if (!isFinite(newViewport.y)) newViewport.y = state.viewport.y;
+
+		return {
+			...state,
+			viewport: newViewport
+		};
+	});
 }
 
 export function setZoom(zoom: number): void {
@@ -648,7 +850,12 @@ export interface BrushStampParams {
 	isEraser: boolean;
 }
 
-export function applyBrushStampLocal(layerId: string, params: BrushStampParams): void {
+export function applyBrushStampLocal(
+	layerId: string,
+	params: BrushStampParams,
+	selection?: Selection,
+	polygonPoints?: { x: number; y: number }[]
+): void {
 	const state = get(activeDocumentState);
 	if (!state) return;
 
@@ -669,8 +876,14 @@ export function applyBrushStampLocal(layerId: string, params: BrushStampParams):
 	const minY = Math.max(0, Math.floor(y - radius));
 	const maxY = Math.min(height - 1, Math.ceil(y + radius));
 
+	// Use passed selection or fallback to no selection
+	const currentSelection = selection ?? { type: 'none' as const, feather: 0 };
+
 	for (let py = minY; py <= maxY; py++) {
 		for (let px = minX; px <= maxX; px++) {
+			// Skip pixels outside the selection (if there is one)
+			if (!isPointInSelectionBounds(px, py, currentSelection, polygonPoints)) continue;
+
 			const dx = px - x;
 			const dy = py - y;
 			const dist = Math.sqrt(dx * dx + dy * dy);
@@ -747,7 +960,9 @@ export function applyBrushStrokLocal(
 	points: { x: number; y: number }[],
 	settings: { size: number; hardness: number; opacity: number; flow: number },
 	color: { r: number; g: number; b: number; a: number },
-	isEraser: boolean
+	isEraser: boolean,
+	selection?: Selection,
+	polygonPoints?: { x: number; y: number }[]
 ): void {
 	for (const point of points) {
 		applyBrushStampLocal(layerId, {
@@ -759,7 +974,7 @@ export function applyBrushStrokLocal(
 			flow: settings.flow,
 			color,
 			isEraser
-		});
+		}, selection, polygonPoints);
 	}
 	markLayerDirty(layerId);
 }
@@ -782,4 +997,146 @@ export function hasUnsavedDocuments(): boolean {
 		if (state.isDirty) return true;
 	}
 	return false;
+}
+
+/**
+ * Rename a document
+ */
+export async function renameDocument(docId: string, newName: string): Promise<void> {
+	const docs = get(openDocuments);
+	const state = docs.get(docId);
+	if (!state) return;
+
+	// Update local state
+	openDocuments.update((docs) => {
+		const docState = docs.get(docId);
+		if (docState) {
+			docs.set(docId, {
+				...docState,
+				document: { ...docState.document, name: newName },
+				isDirty: true
+			});
+		}
+		return new Map(docs);
+	});
+
+	// Update backend
+	try {
+		await tauri.renameDocument(docId, newName);
+	} catch (e) {
+		console.error('Failed to rename document on backend:', e);
+	}
+}
+
+/**
+ * Get a display name for a document (filename if saved, document name otherwise)
+ */
+export function getDocumentDisplayName(doc: Document): string {
+	if (doc.sourcePath) {
+		return getFilenameFromPath(doc.sourcePath);
+	}
+	return doc.name;
+}
+
+/**
+ * Crop the document to the specified region.
+ * This updates the backend, reloads pixel data, and updates local state.
+ */
+export async function cropDocumentToRegion(
+	docId: string,
+	x: number,
+	y: number,
+	width: number,
+	height: number
+): Promise<boolean> {
+	const docs = get(openDocuments);
+	const state = docs.get(docId);
+	if (!state) return false;
+
+	isLoading.set(true);
+	error.set(null);
+
+	try {
+		// Sync dirty layers to backend before crop
+		await syncDirtyLayersToBackend(docId);
+
+		// Call backend crop command
+		const result = await tauri.cropDocument(docId, x, y, width, height);
+
+		// Reload document from backend to get updated dimensions
+		const updatedDoc = await tauri.getDocument(docId);
+
+		// Reload pixel data for all layers
+		const newBuffers = await loadLayerPixelsForDocument(updatedDoc);
+
+		// Update document state
+		updateDocumentState(docId, (s) => ({
+			...s,
+			document: updatedDoc,
+			layerPixelBuffers: newBuffers,
+			isDirty: true
+		}));
+
+		// Clear history since document dimensions changed
+		// (old pixel coordinates no longer map to new coordinates)
+		// TODO: Implement full document snapshot history for crop operations
+		// Use dynamic import to avoid circular dependency with history.ts
+		const { history } = await import('./history');
+		history.clear();
+
+		return true;
+	} catch (e) {
+		error.set(e instanceof Error ? e.message : String(e));
+		console.error('Failed to crop document:', e);
+		return false;
+	} finally {
+		isLoading.set(false);
+	}
+}
+
+/**
+ * Open a document from a specific file path (used for recent files)
+ */
+export async function openDocumentFromPath(path: string): Promise<void> {
+	isLoading.set(true);
+	error.set(null);
+
+	try {
+		let doc: Document;
+
+		if (tauri.isDrkrFile(path)) {
+			doc = await tauri.openDocumentDrkr(path);
+		} else {
+			doc = await tauri.openDocument(path);
+		}
+
+		// Check if this document is already open
+		const existingDocs = get(openDocuments);
+		if (existingDocs.has(doc.id)) {
+			// Just switch to the existing document
+			activeDocumentId.set(doc.id);
+			return;
+		}
+
+		const state = createDefaultDocumentState(doc);
+		state.layerPixelBuffers = await loadLayerPixelsForDocument(doc);
+
+		// Add to open documents
+		openDocuments.update((docs) => {
+			docs.set(doc.id, state);
+			return new Map(docs);
+		});
+
+		// Add to tab order and make active
+		documentOrder.update((order) => [...order, doc.id]);
+		activeDocumentId.set(doc.id);
+
+		// Add to recent files
+		addRecentFile(path, getFilenameFromPath(path));
+	} catch (e) {
+		error.set(e instanceof Error ? e.message : String(e));
+		throw e;
+	} finally {
+		isLoading.set(false);
+	}
 }

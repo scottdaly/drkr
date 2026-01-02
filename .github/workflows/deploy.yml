@@ -1,0 +1,50 @@
+# darker/.github/workflows/deploy.yml
+name: Deploy Editor
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:  # Manual trigger
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      
+      - name: Install wasm-pack
+        run: cargo install wasm-pack
+      
+      - name: Install dependencies
+        run: npm ci
+      
+      - name: Build WASM
+        run: npm run build:wasm
+      
+      - name: Build web app
+        run: npm run build
+      
+      - name: Deploy to VPS
+        uses: easingthemes/ssh-deploy@v5
+        with:
+          SSH_PRIVATE_KEY: ${{ secrets.VPS_SSH_KEY }}
+          REMOTE_HOST: ${{ secrets.VPS_HOST }}
+          REMOTE_USER: scott
+          SOURCE: "build/"
+          TARGET: "/var/www/darker.app/editor"
+          ARGS: "-avz --delete"

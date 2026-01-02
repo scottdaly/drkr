@@ -6,7 +6,7 @@ mod engine;
 mod error;
 mod io;
 
-use commands::{brush, document, filters, layer};
+use commands::{brush, crop, document, filters, layer};
 use engine::DocumentManager;
 use std::sync::Mutex;
 
@@ -26,16 +26,21 @@ fn main() {
             document::open_document_drkr,
             document::list_documents,
             document::set_document_path,
+            document::rename_document,
             // Layer commands
             layer::add_layer,
             layer::remove_layer,
             layer::update_layer,
             layer::reorder_layers,
             layer::get_layer_pixels,
+            layer::get_layer_pixels_base64,
+            layer::set_layer_pixels_base64,
             // Brush commands
             brush::apply_brush_stroke,
             // Filter commands
             filters::apply_filter,
+            // Crop commands
+            crop::crop_document,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

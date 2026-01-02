@@ -2,6 +2,7 @@ import { get, writable } from 'svelte/store';
 import { brushSettings, colors, activeTool } from '$lib/stores/tools';
 import { document as documentStore, activeLayerId, applyBrushStrokLocal, markLayerDirty, layerPixelBuffers } from '$lib/stores/documents';
 import { history, captureRegion, createBrushHistoryEntry } from '$lib/stores/history';
+import { selectionState } from '$lib/stores/selection';
 import type { BrushSettings, Color } from '$lib/types/tools';
 import type { Viewport } from '$lib/types/document';
 import * as tauri from '$lib/services/tauri';
@@ -103,6 +104,10 @@ class BrushEngine {
 		}
 
 		// Apply first point locally for immediate feedback
+		const currentSelectionState = get(selectionState);
+		const polygonPoints = currentSelectionState.vectorPath?.type === 'polygon'
+			? currentSelectionState.vectorPath.points
+			: undefined;
 		applyBrushStrokLocal(
 			layerId,
 			[docPoint],
@@ -113,7 +118,9 @@ class BrushEngine {
 				flow: settings.flow
 			},
 			colorState.foreground,
-			isEraser
+			isEraser,
+			currentSelectionState.selection,
+			polygonPoints
 		);
 
 		// Clear any previous preview
@@ -173,6 +180,10 @@ class BrushEngine {
 
 			// Apply stroke locally for immediate visual feedback
 			if (layerId && newPoints.length > 0) {
+				const currentSelectionState = get(selectionState);
+				const polygonPoints = currentSelectionState.vectorPath?.type === 'polygon'
+					? currentSelectionState.vectorPath.points
+					: undefined;
 				applyBrushStrokLocal(
 					layerId,
 					newPoints,
@@ -183,7 +194,9 @@ class BrushEngine {
 						flow: settings.flow
 					},
 					colorState.foreground,
-					isEraser
+					isEraser,
+					currentSelectionState.selection,
+					polygonPoints
 				);
 			}
 		}
